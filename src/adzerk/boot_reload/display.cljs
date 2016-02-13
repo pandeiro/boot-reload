@@ -52,12 +52,15 @@
            :mr10      [:margin-right "10px"]
            :pad       [:padding "12px"]
            :container [:color "black"
+                       :max-height "320px"
+                       :overflow "scroll"
                        :transition (str transition-duration "ms")
                        :font-family "sans-serif"
                        :position "fixed"
                        :left "0px"
                        :right "0px"
-                       :bottom "0px"]
+                       :bottom "0px"
+                       :z-index "999999"]
            :hide      [:opacity "0"
                        :bottom "-100px"]}]
     {:style (apply concat (map s types))}))
@@ -106,7 +109,7 @@
     (dom/appendChild js/document.body el)
     (timer/callOnce show! transition-duration)
     (when no-prob?
-      (timer/callOnce hide! (* transition-duration 3)))))
+      (timer/callOnce hide! (* transition-duration 5)))))
 
 (defn gen-id []
   (str "boot-reload-hud-" (name (gensym))))
@@ -116,7 +119,9 @@
 (defn display [messages opts]
   (swap! current-container
          (fn [container]
-           (when container (remove-container! container))
+           (when container
+             (try (remove-container! container)
+                  (catch js/Error _)))
            (let [id (gen-id)]
              (insert-container! id messages)
              id))))

@@ -15,28 +15,38 @@
 (defn- make-pod []
   (future (-> (get-env) (update-in [:dependencies] into deps) pod/make-pod)))
 
-(defn- changed [before after]
+(defn- changed [before after static-files]
   (when before
     (->> (fileset-diff before after :hash)
          output-files
          (sort-by :dependency-order)
-         (map tmp-path))))
+         (map tmp-path)
+         (remove static-files))))
 
 (defn- start-server [pod {:keys [ip port ws-host secure?] :as opts}]
   (let [{:keys [ip port]} (pod/with-call-in pod (adzerk.boot-reload.server/start ~opts))
         host              (cond ws-host ws-host (= ip "0.0.0.0") "localhost" :else ip)
         proto             (if secure? "wss" "ws")]
-    (util/with-let [url (format "%s://%s:%d" proto host port)]
-      (util/info "Starting reload server on %s\n" url))))
+    [(util/with-let [url (format "%s://%s:%d" proto host port)]
+       (util/info "Starting reload server on %s\n" url))
+     ws-host]))
 
-(defn- write-cljs! [f url on-jsload]
-  (util/info "Writing %s...\n" (.getName f))
+(defn- write-cljs! [f url ws-host on-jsload asset-host]
+  (util/info "Writing %s to connect to %s...\n" (.getName f)
+             (if ws-host url "default websocket host"))
   (->> (template
          ((ns adzerk.boot-reload
             (:require
              [adzerk.boot-reload.client :as client]
-             ~@(when on-jsload [(symbol (namespace on-jsload))])))
-          (client/connect ~url {:on-jsload #(~(or on-jsload '+))})))
+             ~@(when on-jsload [(symbol (namespace on-jsload))]))
+            (:import goog.Uri))
+          (let [passed-uri  (Uri. ~url)
+                protocol    (.getScheme passed-uri)
+                host        (or ~ws-host (.-hostname (.-location js/window)))
+                port        (.getPort passed-uri)
+                url         (str proto "://" host ":" port)]
+            (client/connect url {:on-jsload #(~(or on-jsload '+))
+                                 :asset-host ~asset-host}))))
     (map pr-str) (interpose "\n") (apply str) (spit f)))
 
 (defn- send-visual! [pod messages]
@@ -65,12 +75,12 @@
         pr-str
         ((partial spit out-file))))))
 
-(defn relevant-cljs-edn [prev fileset ids]
+(defn- relevant-cljs-edn [fileset ids]
   (let [relevant  (map #(str % ".cljs.edn") ids)
         f         (if ids
                     #(b/by-path relevant %)
                     #(b/by-ext [".cljs.edn"] %))]
-    (-> (b/fileset-diff prev fileset) b/input-files f)))
+    (-> fileset b/input-files f)))
 
 (deftask reload
   "Live reload of page resources in browser via websocket.
@@ -86,13 +96,17 @@
   emacsclient -n +%s:%s %s"
 
   [b ids BUILD_IDS #{str} "Only inject reloading into these builds (= .cljs.edn files)"
-   i ip ADDR         str  "The (optional) IP address for the websocket server to listen on."
-   p port PORT       int  "The (optional) port the websocket server listens on."
-   w ws-host WSADDR  str  "The (optional) websocket host address to pass to clients."
-   j on-jsload SYM   sym  "The (optional) callback to call when JS files are reloaded."
-   a asset-path PATH str  "The (optional) asset-path. This is removed from the start of reloaded urls."
+   ;; Websocket Server
+   i ip ADDR         str  "The IP address for the websocket server to listen on. (optional)"
+   p port PORT       int  "The port the websocket server listens on. (optional)"
+   w ws-host WSADDR  str  "The websocket host clients connect to. Defaults to current host. (optional)"
    s secure          bool "Flag to indicate whether the client should connect via wss. Defaults to false."
-   o open-file COMMAND str "The (optional) command to run when warning or exception is clicked on HUD. Passed to format."]
+   ;; Other Configuration
+   j on-jsload SYM     sym "The callback to call when JS files are reloaded. (optional)"
+   _ asset-host HOST   str "The asset-host where to load files from. Defaults to host of opened page. (optional)"
+   a asset-path PATH   str "The asset-path. This is removed from the start of reloaded urls. (optional)"
+   o open-file COMMAND str "The command to run when warning or exception is clicked on HUD. Passed to format. (optional)"
+   v disable-hud      bool "Toggle to disable HUD. Defaults to false (visible)."]
 
   (let [pod  (make-pod)
         src  (tmp-dir!)
@@ -100,15 +114,15 @@
         prev-pre (atom nil)
         prev (atom nil)
         out  (doto (io/file src "adzerk" "boot_reload.cljs") io/make-parents)
-        url  (start-server @pod {:ip ip :port port :ws-host ws-host :secure? secure
-                                 :open-file open-file})]
+        [url ws-host] (start-server @pod {:ip ip :port port :ws-host ws-host :secure? secure
+                                    :open-file open-file})]
     (set-env! :source-paths #(conj % (.getPath src)))
-    (write-cljs! out url on-jsload)
+    (write-cljs! out url ws-host on-jsload asset-host)
     (fn [next-task]
       (fn [fileset]
         (pod/with-call-in @pod
           (adzerk.boot-reload.server/set-options {:open-file ~open-file}))
-        (doseq [f (relevant-cljs-edn @prev-pre fileset ids)]
+        (doseq [f (relevant-cljs-edn (b/fileset-diff @prev-pre fileset) ids)]
           (let [path     (tmp-path f)
                 in-file  (tmp-file f)
                 out-file (io/file tmp path)]
@@ -118,15 +132,21 @@
               fileset (try
                         (next-task fileset)
                         (catch Exception e
-                          (if (= :boot-cljs (:from (ex-data e)))
+                          (if (and (= :boot-cljs (:from (ex-data e))) (not disable-hud))
                             (send-visual! @pod {:exception (merge {:message (.getMessage e)}
                                                                   (ex-data e))}))
                           (throw e)))]
-          (let [warnings (apply merge (map :adzerk.boot-cljs/warnings (relevant-cljs-edn nil fileset ids)))]
-            (send-visual! @pod {:warnings warnings})
+          (let [cljs-edn (relevant-cljs-edn fileset ids)
+                warnings (mapcat :adzerk.boot-cljs/warnings cljs-edn)
+                static-files (->> cljs-edn
+                                  (map b/tmp-path)
+                                  (map(fn [x] (clojure.string/replace x #"\.cljs\.edn$" ".js")))
+                                  set)]
+            (if-not disable-hud
+              (send-visual! @pod {:warnings warnings}))
             ; Only send changed files when there are no warnings
             ; As prev is updated only when changes are sent, changes are queued untill they can be sent
             (when (empty? warnings)
-              (send-changed! @pod asset-path (changed @prev fileset))
+              (send-changed! @pod asset-path (changed @prev fileset static-files))
               (reset! prev fileset))
             fileset))))))

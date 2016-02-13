@@ -1,4 +1,4 @@
-# boot-reload
+# boot-reload [![Downloads](https://jarkeeper.com/adzerk/boot-reload/downloads.svg)](https://jarkeeper.com/adzerk/boot-reload) [![Dependencies Status](https://jarkeeper.com/adzerk/boot-reload/status.svg)](https://jarkeeper.com/adzerk/boot-reload)
 
 [![Clojars Project][2]][3]
 
@@ -6,20 +6,34 @@
 the project change. Communication with the client is via websockets.
 
 * Provides the `reload` task
+* Reload client can show warnings and exceptions from ClojureScript build on **heads-up display**.
+    * Requires `[adzerk/boot-cljs "1.7.48-5"]`
 
 ## Usage
 
-Add `boot-reload` to your `build.boot` dependencies and `require` the namespace:
+Add dependency to `build.boot` and `require` the task:
 
 ```clj
 (set-env! :dependencies '[[adzerk/boot-reload "X.Y.Z" :scope "test"]])
-(require '[adzerk.boot-reload :refer :all])
+
+(require '[adzerk.boot-reload :refer [reload]])
 ```
+
+Add the task to your development pipeline **before `(cljs ...)`**:
+
+```clj
+(deftask dev []
+  (comp
+   (reload)
+   (cljs)))
+```
+
+## Additional Info
 
 You can see the options available on the command line:
 
 ```bash
-boot reload -h
+boot reload --help
 ```
 
 or in the REPL:
@@ -30,11 +44,14 @@ boot.user=> (doc reload)
 
 ## Examples
 
-FIXME.
+For in-depth, up-to-date examples of how to use `reload` in development, see
+[Boot templates and example projects](https://github.com/clojure/clojurescript/wiki#boot)
+in the ClojureScript wiki.
 
 ## License
 
-Copyright © 2014 Adzerk
+Copyright &copy; 2014 Adzerk<br>
+Copyright &copy; 2015-2015 Juho Teperi
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.
